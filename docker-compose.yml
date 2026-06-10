@@ -1,0 +1,224 @@
+# ===================================================================
+# Spirit Tech Revolution – Infrastructure partagée (Contabo VPS)
+# ===================================================================
+# Démarre UNE SEULE FOIS, commune à tous les projets.
+#
+# Prérequis (une seule fois sur le serveur) :
+#   docker network create proxy
+#   touch acme.json && chmod 600 acme.json
+#
+# Services               URL publique
+# ─────────────────────  ───────────────────────────────────
+# Traefik dashboard    → https://traefik.INFRA_DOMAIN
+# Keycloak (IAM)       → https://auth.INFRA_DOMAIN
+# pgAdmin              → https://db.INFRA_DOMAIN
+# MinIO console        → https://minio.INFRA_DOMAIN
+# MinIO API S3         → https://storage.INFRA_DOMAIN
+# Dozzle (logs)        → https://logs.INFRA_DOMAIN
+#
+# Démarrage :
+#   cd /opt/infra
+#   docker compose --env-file .env up -d
+#
+# Mise à jour :
+#   git pull && docker compose --env-file .env up -d
+# ===================================================================
+
+services:
+
+  # ─── Traefik v3 – Reverse proxy + SSL Let's Encrypt ───────────────
+  traefik:
+    image: traefik:v3
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --api.dashboard=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/acme.json
+      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+      - --log.level=INFO
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./acme.json:/acme.json
+    networks:
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.traefik-dash.rule=Host(`traefik.${INFRA_DOMAIN}`)
+      - traefik.http.routers.traefik-dash.entrypoints=websecure
+      - traefik.http.routers.traefik-dash.tls.certresolver=letsencrypt
+      - traefik.http.routers.traefik-dash.service=api@internal
+      - traefik.http.routers.traefik-dash.middlewares=admin-auth
+      - traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_BASIC_AUTH}
+
+  # ─── PostgreSQL 17 – Instance unique, toutes les bases ─────────────
+  # Pas de port exposé — accès via infra-internal uniquement
+  postgres-shared:
+    image: postgres:17-alpine
+    container_name: postgres-shared
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    networks:
+      - infra-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ─── Keycloak 26 – IAM partagé, un realm par projet ────────────────
+  # Un realm par projet : dinthialma, pharmagest
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1.5
+    container_name: keycloak
+    restart: unless-stopped
+    command: start
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres-shared
+      KC_DB_URL_DATABASE: db-keycloak
+      KC_DB_USERNAME: ${POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Traefik gère le TLS – Keycloak reçoit du HTTP depuis Traefik
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: auth.${INFRA_DOMAIN}
+      KC_HOSTNAME_STRICT: "false"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_LOG_LEVEL: info
+      JAVA_OPTS_APPEND: "-Xms256m -Xmx512m"
+    networks:
+      - proxy
+      - infra-internal
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.keycloak.rule=Host(`auth.${INFRA_DOMAIN}`)
+      - traefik.http.routers.keycloak.entrypoints=websecure
+      - traefik.http.routers.keycloak.tls.certresolver=letsencrypt
+      - traefik.http.services.keycloak.loadbalancer.server.port=8080
+    depends_on:
+      postgres-shared:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health/ready || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
+  # ─── pgAdmin 4 – Gestion de toutes les bases ───────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - proxy
+      - infra-internal
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.pgadmin.rule=Host(`db.${INFRA_DOMAIN}`)
+      - traefik.http.routers.pgadmin.entrypoints=websecure
+      - traefik.http.routers.pgadmin.tls.certresolver=letsencrypt
+      - traefik.http.services.pgadmin.loadbalancer.server.port=80
+    depends_on:
+      postgres-shared:
+        condition: service_healthy
+
+  # ─── MinIO – Object storage S3-compatible ──────────────────────────
+  # Console  : https://minio.INFRA_DOMAIN
+  # API S3   : https://storage.INFRA_DOMAIN  ← URL que les backends utilisent
+  # Interne  : http://minio:9000             ← depuis les conteneurs app
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    networks:
+      - proxy
+      - infra-internal
+    labels:
+      # Console web MinIO
+      - traefik.enable=true
+      - traefik.http.routers.minio-console.rule=Host(`minio.${INFRA_DOMAIN}`)
+      - traefik.http.routers.minio-console.entrypoints=websecure
+      - traefik.http.routers.minio-console.tls.certresolver=letsencrypt
+      - traefik.http.routers.minio-console.service=minio-console-svc
+      - traefik.http.routers.minio-console.middlewares=admin-auth
+      - traefik.http.services.minio-console-svc.loadbalancer.server.port=9001
+      # API S3 publique
+      - traefik.http.routers.minio-api.rule=Host(`storage.${INFRA_DOMAIN}`)
+      - traefik.http.routers.minio-api.entrypoints=websecure
+      - traefik.http.routers.minio-api.tls.certresolver=letsencrypt
+      - traefik.http.routers.minio-api.service=minio-api-svc
+      - traefik.http.services.minio-api-svc.loadbalancer.server.port=9000
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─── Dozzle – Logs temps réel de tous les conteneurs ───────────────
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.dozzle.rule=Host(`logs.${INFRA_DOMAIN}`)
+      - traefik.http.routers.dozzle.entrypoints=websecure
+      - traefik.http.routers.dozzle.tls.certresolver=letsencrypt
+      - traefik.http.routers.dozzle.middlewares=admin-auth
+      - traefik.http.services.dozzle.loadbalancer.server.port=8080
+    environment:
+      DOZZLE_LEVEL: info
+
+volumes:
+  postgres_data:
+    name: infra-postgres-data
+  pgadmin_data:
+    name: infra-pgadmin-data
+  minio_data:
+    name: infra-minio-data
+
+networks:
+  proxy:
+    external: true
+  infra-internal:
+    name: infra-internal
+    driver: bridge

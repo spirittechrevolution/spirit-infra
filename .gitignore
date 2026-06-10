@@ -1,0 +1,7 @@
+# Secrets – ne jamais committer
+.env
+acme.json
+
+# OS
+.DS_Store
+Thumbs.db
