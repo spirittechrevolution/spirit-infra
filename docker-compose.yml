@@ -1,5 +1,5 @@
 # ===================================================================
-# Spirit Tech Revolution – Infrastructure partagée (Contabo VPS)
+# Spirit Tech Revolution – Infrastructure partagée (Database Smart VPS)
 # ===================================================================
 # Démarre UNE SEULE FOIS, commune à tous les projets.
 #
@@ -33,8 +33,10 @@ services:
     restart: unless-stopped
     command:
       - --api.dashboard=true
+      - --api.insecure=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=proxy
       - --entrypoints.web.address=:80
       - --entrypoints.web.http.redirections.entrypoint.to=websecure
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
@@ -46,6 +48,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./acme.json:/acme.json
@@ -112,6 +115,7 @@ services:
       - infra-internal
     labels:
       - traefik.enable=true
+      - traefik.docker.network=proxy
       - traefik.http.routers.keycloak.rule=Host(`auth.${INFRA_DOMAIN}`)
       - traefik.http.routers.keycloak.entrypoints=websecure
       - traefik.http.routers.keycloak.tls.certresolver=letsencrypt
@@ -142,6 +146,7 @@ services:
       - infra-internal
     labels:
       - traefik.enable=true
+      - traefik.docker.network=proxy
       - traefik.http.routers.pgadmin.rule=Host(`db.${INFRA_DOMAIN}`)
       - traefik.http.routers.pgadmin.entrypoints=websecure
       - traefik.http.routers.pgadmin.tls.certresolver=letsencrypt
@@ -170,6 +175,7 @@ services:
     labels:
       # Console web MinIO
       - traefik.enable=true
+      - traefik.docker.network=proxy
       - traefik.http.routers.minio-console.rule=Host(`minio.${INFRA_DOMAIN}`)
       - traefik.http.routers.minio-console.entrypoints=websecure
       - traefik.http.routers.minio-console.tls.certresolver=letsencrypt
