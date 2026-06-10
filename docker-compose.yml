@@ -103,7 +103,7 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       # Traefik gère le TLS – Keycloak reçoit du HTTP depuis Traefik
       KC_HTTP_ENABLED: "true"
-      KC_HOSTNAME: auth.${INFRA_DOMAIN}
+      KC_HOSTNAME: https://auth.${INFRA_DOMAIN}
       KC_HOSTNAME_STRICT: "false"
       KC_PROXY_HEADERS: xforwarded
       KC_HEALTH_ENABLED: "true"
