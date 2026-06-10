@@ -182,7 +182,6 @@ services:
       - traefik.http.routers.minio-console.entrypoints=websecure
       - traefik.http.routers.minio-console.tls.certresolver=letsencrypt
       - traefik.http.routers.minio-console.service=minio-console-svc
-      - traefik.http.routers.minio-console.middlewares=admin-auth
       - traefik.http.services.minio-console-svc.loadbalancer.server.port=9001
       # API S3 publique
       - traefik.http.routers.minio-api.rule=Host(`storage.${INFRA_DOMAIN}`)
